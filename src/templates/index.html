@@ -1,0 +1,91 @@
+{% extends "base.html" %}
+{% block title %}Dashboard - Job Scheduler{% endblock %}
+
+{% block content %}
+<div class="toolbar">
+    <h1>Dashboard</h1>
+    <form action="/api/reload" method="post" style="margin-left: auto;">
+        <button type="submit" class="btn btn-primary">Reload Jobs</button>
+    </form>
+</div>
+
+{% if jobs %}
+<table>
+    <thead>
+        <tr>
+            <th>Job</th>
+            <th>User</th>
+            <th>Schedule</th>
+            <th>Next Run</th>
+            <th>Last Status</th>
+            <th>Last Duration</th>
+            <th>Enabled</th>
+            <th>Actions</th>
+        </tr>
+    </thead>
+    <tbody>
+        {% for job in jobs %}
+        <tr class="{% if job.last_status in ['failed', 'timeout'] %}row-failed{% endif %}">
+            <td>
+                <strong>{{ job.name or job.task }}</strong>
+                {% if job.description %}
+                <br><span class="muted">{{ job.description }}</span>
+                {% endif %}
+            </td>
+            <td>{{ job.user }}</td>
+            <td class="mono">
+                {% if job.schedule_type == 'cron' %}
+                    cron: {{ job.schedule_config }}
+                {% else %}
+                    {{ job.schedule_config }}
+                {% endif %}
+            </td>
+            <td class="mono">{{ job.next_run }}</td>
+            <td>
+                {% if job.last_status %}
+                <span class="status status-{{ job.last_status }}">{{ job.last_status }}</span>
+                {% else %}
+                <span class="muted">-</span>
+                {% endif %}
+            </td>
+            <td class="mono">
+                {% if job.last_duration is not none %}
+                    {{ "%.1f"|format(job.last_duration) }}s
+                {% else %}
+                    -
+                {% endif %}
+            </td>
+            <td>
+                <form action="/api/toggle/{{ job.user }}/{{ job.task }}" method="post" style="display:inline;">
+                    {% if job.enabled %}
+                    <button type="submit" class="btn btn-success btn-sm">ON</button>
+                    {% else %}
+                    <button type="submit" class="btn btn-danger btn-sm">OFF</button>
+                    {% endif %}
+                </form>
+            </td>
+            <td>
+                <form action="/api/run/{{ job.user }}/{{ job.task }}" method="post" style="display:inline;">
+                    <button type="submit" class="btn btn-warning btn-sm">Run Now</button>
+                </form>
+                <a href="/runs?job_id={{ job.id }}" class="btn btn-primary btn-sm">History</a>
+            </td>
+        </tr>
+        {% endfor %}
+    </tbody>
+</table>
+{% else %}
+<div style="text-align:center; padding:60px 20px; background:#fff; border-radius:8px; box-shadow:0 1px 3px rgba(0,0,0,0.1);">
+    <p style="font-size:16px; color:#666;">No jobs found.</p>
+    <p class="muted" style="margin-top:8px;">
+        Add a <code>job.yaml</code> file under <code>jobs/&lt;user&gt;/&lt;task&gt;/</code> to get started.
+    </p>
+</div>
+{% endif %}
+{% endblock %}
+
+{% block scripts %}
+<script>
+    setTimeout(function() { location.reload(); }, 30000);
+</script>
+{% endblock %}

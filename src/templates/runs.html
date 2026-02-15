@@ -1,0 +1,137 @@
+{% extends "base.html" %}
+{% block title %}Run History - Job Scheduler{% endblock %}
+
+{% block content %}
+<div class="toolbar">
+    <h1>Run History</h1>
+    <form method="get" action="/runs" style="display:flex; gap:8px; margin-left:auto; align-items:center;">
+        <select name="job_id">
+            <option value="">All Jobs</option>
+            {% for job in jobs %}
+            <option value="{{ job.id }}" {% if filter_job_id == job.id %}selected{% endif %}>
+                {{ job.id }}
+            </option>
+            {% endfor %}
+        </select>
+        <select name="status">
+            <option value="">All Status</option>
+            <option value="success" {% if filter_status == 'success' %}selected{% endif %}>success</option>
+            <option value="failed" {% if filter_status == 'failed' %}selected{% endif %}>failed</option>
+            <option value="timeout" {% if filter_status == 'timeout' %}selected{% endif %}>timeout</option>
+            <option value="running" {% if filter_status == 'running' %}selected{% endif %}>running</option>
+        </select>
+        <button type="submit" class="btn btn-primary btn-sm">Filter</button>
+    </form>
+</div>
+
+{% if runs %}
+<table>
+    <thead>
+        <tr>
+            <th>#</th>
+            <th>Job</th>
+            <th>Started</th>
+            <th>Duration</th>
+            <th>Status</th>
+            <th>Error</th>
+            <th>Log</th>
+        </tr>
+    </thead>
+    <tbody>
+        {% for run in runs %}
+        <tr class="{% if run.status in ['failed', 'timeout'] %}row-failed{% endif %}">
+            <td class="muted">{{ run.id }}</td>
+            <td>
+                <strong>{{ run.job_name or run.job_id }}</strong>
+                <br><span class="muted mono">{{ run.job_id }}</span>
+            </td>
+            <td class="mono">{{ run.started_at[:19] }}</td>
+            <td class="mono">
+                {% if run.duration_seconds is not none %}
+                    {{ "%.1f"|format(run.duration_seconds) }}s
+                {% else %}
+                    -
+                {% endif %}
+            </td>
+            <td>
+                <span class="status status-{{ run.status }}">{{ run.status }}</span>
+            </td>
+            <td>
+                {% if run.error_message %}
+                <span class="muted" title="{{ run.error_message }}">
+                    {{ run.error_message[:80] }}{% if run.error_message|length > 80 %}...{% endif %}
+                </span>
+                {% else %}
+                -
+                {% endif %}
+            </td>
+            <td>
+                {% if run.log_path %}
+                <a href="#" class="btn btn-primary btn-sm" onclick="showLog('{{ run.log_path }}'); return false;">
+                    View
+                </a>
+                {% else %}
+                -
+                {% endif %}
+            </td>
+        </tr>
+        {% endfor %}
+    </tbody>
+</table>
+{% else %}
+<div style="text-align:center; padding:60px 20px; background:#fff; border-radius:8px; box-shadow:0 1px 3px rgba(0,0,0,0.1);">
+    <p style="font-size:16px; color:#666;">No run records found.</p>
+</div>
+{% endif %}
+
+<!-- Log Modal -->
+<div class="modal-overlay" id="logModal">
+    <div class="modal">
+        <div class="modal-header">
+            <h3 id="logModalTitle">Log Output</h3>
+            <button class="modal-close" onclick="closeModal()">&times;</button>
+        </div>
+        <div class="modal-body">
+            <pre id="logContent">Loading...</pre>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function showLog(logPath) {
+    var modal = document.getElementById('logModal');
+    var content = document.getElementById('logContent');
+    var title = document.getElementById('logModalTitle');
+
+    modal.classList.add('active');
+    content.textContent = 'Loading...';
+    title.textContent = logPath;
+
+    fetch('/logs/' + logPath)
+        .then(function(res) {
+            if (!res.ok) throw new Error('Not found');
+            return res.text();
+        })
+        .then(function(text) {
+            content.textContent = text;
+        })
+        .catch(function(err) {
+            content.textContent = 'Failed to load log: ' + err.message;
+        });
+}
+
+function closeModal() {
+    document.getElementById('logModal').classList.remove('active');
+}
+
+document.getElementById('logModal').addEventListener('click', function(e) {
+    if (e.target === this) closeModal();
+});
+
+document.addEventListener('keydown', function(e) {
+    if (e.key === 'Escape') closeModal();
+});
+</script>
+{% endblock %}

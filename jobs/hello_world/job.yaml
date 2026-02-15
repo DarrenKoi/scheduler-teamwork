@@ -1,0 +1,9 @@
+name: "Hello World"
+description: "A simple test job that prints a greeting"
+
+schedule:
+  type: interval
+  minutes: 30
+
+entry_point: main.py
+timeout: 60

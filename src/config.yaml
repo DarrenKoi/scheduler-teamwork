@@ -1,0 +1,19 @@
+server:
+  host: "0.0.0.0"
+  port: 5050
+  debug: false
+
+paths:
+  jobs_dir: "jobs"          # 상대경로 (프로젝트 루트 기준)
+  logs_dir: "logs"
+  db_path: "data/jobs.db"
+
+scheduler:
+  scan_interval_seconds: 60       # 작업 폴더 스캔 주기
+
+security:
+  allowed_users: []               # 비어있으면 모든 사용자 허용
+
+log_retention:
+  days: 30                        # 로그 보존 기간
+  cleanup_interval_hours: 24      # 정리 주기
