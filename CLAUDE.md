@@ -17,7 +17,7 @@
 ```
 job-scheduler/
 ├── src/                    # 백엔드 코드
-│   ├── app.py              # Flask 웹 서버 (port 5050)
+│   ├── app.py              # Flask 웹 서버 (port 8000)
 │   ├── job_manager.py      # 작업 관리 엔진
 │   ├── config.yaml         # 서버/스케줄러 설정
 │   └── templates/          # (Legacy) Jinja2 웹 UI
@@ -40,7 +40,7 @@ job-scheduler/
 ```bash
 # 백엔드
 uv sync                     # 의존성 설치
-uv run src/app.py           # Flask 서버 실행 (localhost:5050)
+uv run src/app.py           # Flask 서버 실행 (localhost:8000)
 
 # 프론트엔드
 cd frontend && npm install  # 의존성 설치

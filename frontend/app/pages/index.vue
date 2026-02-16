@@ -1,8 +1,14 @@
 <script setup lang="ts">
-const apiBase = 'http://localhost:5050'
+const apiBase = '/api'
 
-const { data: jobs, refresh: refreshJobs } = await useFetch(`${apiBase}/api/jobs`)
-const { data: systemStatus, refresh: refreshStatus } = await useFetch(`${apiBase}/api/status`)
+const { data: jobs, refresh: refreshJobs } = await useFetch(() => `${apiBase}/jobs`, {
+  server: false,
+  default: () => []
+})
+const { data: systemStatus, refresh: refreshStatus } = await useFetch(() => `${apiBase}/status`, {
+  server: false,
+  default: () => ({})
+})
 
 const uploadModal = ref(false)
 const uploadState = reactive({
@@ -124,7 +130,7 @@ async function onUpload() {
   }
 
   try {
-    const res: any = await $fetch(`${apiBase}/api/upload`, {
+    const res: any = await $fetch(`${apiBase}/upload`, {
       method: 'POST',
       body: formData
     })
@@ -152,7 +158,10 @@ const editState = reactive({
     scheduleType: 'interval',
     intervalValue: 30,
     intervalUnit: 'minutes',
-    cronExpression: '* * * * *'
+    cronExpression: '* * * * *',
+    resourceGroups: [] as string[],
+    queueWaitTimeout: null as number | null,
+    newGroupInput: ''
 })
 
 function openEditModal(job: any) {
@@ -175,6 +184,9 @@ function openEditModal(job: any) {
         const parts = [config.minute || '*', config.hour || '*', config.day || '*', config.month || '*', config.day_of_week || '*']
         editState.cronExpression = parts.join(' ')
     }
+    editState.resourceGroups = Array.isArray(job.resource_groups) ? [...job.resource_groups] : []
+    editState.queueWaitTimeout = job.queue_wait_timeout ?? null
+    editState.newGroupInput = ''
     editModal.value = true
 }
 
@@ -184,7 +196,9 @@ async function onUpdateConfig() {
         name: editState.name,
         description: editState.description,
         entry_point: editState.entryPoint,
-        schedule: { type: editState.scheduleType }
+        schedule: { type: editState.scheduleType },
+        resource_groups: editState.resourceGroups.length > 0 ? editState.resourceGroups : undefined,
+        queue_wait_timeout: editState.queueWaitTimeout ?? undefined
     }
     if (editState.scheduleType === 'interval') {
         newConfig.schedule[editState.intervalUnit] = parseInt(editState.intervalValue.toString())
@@ -195,7 +209,7 @@ async function onUpdateConfig() {
         }
     }
     try {
-        await $fetch(`${apiBase}/api/jobs/${editState.task}/config`, { method: 'POST', body: newConfig })
+        await $fetch(`${apiBase}/jobs/${editState.task}/config`, { method: 'POST', body: newConfig })
         editModal.value = false
         refreshJobs()
         alert('Configuration updated successfully')
@@ -206,13 +220,25 @@ async function onUpdateConfig() {
     }
 }
 
+function addResourceGroup() {
+    const group = editState.newGroupInput.trim().toLowerCase().replace(/[^a-z0-9-_]/g, '-')
+    if (group && !editState.resourceGroups.includes(group)) {
+        editState.resourceGroups.push(group)
+    }
+    editState.newGroupInput = ''
+}
+
+function removeResourceGroup(group: string) {
+    editState.resourceGroups = editState.resourceGroups.filter(g => g !== group)
+}
+
 async function runJob(task: string) {
-    await $fetch(`${apiBase}/api/run/${task}`, { method: 'POST' })
+    await $fetch(`${apiBase}/run/${task}`, { method: 'POST' })
     refreshJobs()
 }
 
 async function toggleJob(task: string) {
-    await $fetch(`${apiBase}/api/toggle/${task}`, { method: 'POST' })
+    await $fetch(`${apiBase}/toggle/${task}`, { method: 'POST' })
     refreshJobs()
 }
 </script>
@@ -306,13 +332,21 @@ async function toggleJob(task: string) {
                                     <UBadge color="gray" variant="solid" icon="i-heroicons-clock">
                                     {{ job.schedule_type }}: {{ job.schedule_config }}
                                     </UBadge>
+                                    <UBadge v-for="rg in (job.resource_groups || [])" :key="rg" color="secondary" variant="subtle" size="xs">
+                                        {{ rg }}
+                                    </UBadge>
                             </div>
                         </div>
                         
                         <div class="flex flex-col items-end gap-3">
-                            <UBadge :color="job.last_status === 'success' ? 'green' : job.last_status === 'failed' ? 'red' : job.last_status === 'running' ? 'blue' : 'gray'" size="md">
-                                {{ job.last_status || 'Never Run' }}
-                            </UBadge>
+                            <div class="flex gap-1">
+                                <UBadge v-if="job.is_queued" color="warning" size="md" variant="subtle">
+                                    Queued
+                                </UBadge>
+                                <UBadge :color="job.last_status === 'success' ? 'green' : job.last_status === 'failed' ? 'red' : job.last_status === 'running' ? 'blue' : 'gray'" size="md">
+                                    {{ job.last_status || 'Never Run' }}
+                                </UBadge>
+                            </div>
                             
                             <div class="flex items-center gap-2">
                                 <UTooltip text="Toggle Enable/Disable">
@@ -327,7 +361,7 @@ async function toggleJob(task: string) {
                                     <UButton size="xs" color="primary" icon="i-heroicons-play-circle" @click="runJob(job.task)">Run</UButton>
                                 </UTooltip>
                                 
-                                <UButton size="xs" color="gray" :to="`${apiBase}/runs?job_id=${job.id}`" target="_blank" icon="i-heroicons-clock">History</UButton>
+                                <UButton size="xs" color="gray" :to="`/runs?job_id=${job.id}`" target="_blank" icon="i-heroicons-clock">History</UButton>
                             </div>
                         </div>
                     </div>
@@ -351,14 +385,18 @@ async function toggleJob(task: string) {
                         {{ (systemStatus as any)?.status || 'unknown' }}
                     </UBadge>
                 </div>
-                <div class="mt-4 grid grid-cols-2 gap-4 text-center">
+                <div class="mt-4 grid grid-cols-3 gap-4 text-center">
                     <div class="bg-gray-50 p-2 rounded">
                         <div class="text-2xl font-bold">{{ (systemStatus as any)?.running_count || 0 }}</div>
                         <div class="text-xs text-gray-500">Running</div>
                     </div>
                     <div class="bg-gray-50 p-2 rounded">
+                        <div class="text-2xl font-bold">{{ (systemStatus as any)?.queued_count || 0 }}</div>
+                        <div class="text-xs text-gray-500">Queued</div>
+                    </div>
+                    <div class="bg-gray-50 p-2 rounded">
                         <div class="text-2xl font-bold">{{ (systemStatus as any)?.pending_count || 0 }}</div>
-                        <div class="text-xs text-gray-500">Pending Updates</div>
+                        <div class="text-xs text-gray-500">Pending</div>
                     </div>
                 </div>
             </UCard>
@@ -428,9 +466,9 @@ async function toggleJob(task: string) {
         </template>
         
         <form @submit.prevent="onUpload" class="space-y-6">
-            <UFormGroup label="Task Name" help="Unique identifier for this job (cannot be changed later)">
+            <UFormField label="Task Name" help="Unique identifier for this job (cannot be changed later)">
                 <UInput v-model="uploadState.task" placeholder="e.g. daily-data-sync" icon="i-heroicons-tag" required />
-            </UFormGroup>
+            </UFormField>
 
             <!-- Example Helper -->
             <div>
@@ -457,7 +495,7 @@ async function toggleJob(task: string) {
                 </div>
             </div>
             
-            <UFormGroup label="Files" help="Select Python scripts and optional config files">
+            <UFormField label="Files" help="Select Python scripts and optional config files">
                 <div 
                     class="border-2 border-dashed rounded-xl p-8 text-center transition-colors cursor-pointer"
                     :class="fileList.length > 0 ? 'border-primary-200 bg-primary-50/30' : 'border-gray-200 bg-gray-50 hover:bg-gray-100'"
@@ -492,7 +530,7 @@ async function toggleJob(task: string) {
                         </ul>
                     </div>
                 </div>
-            </UFormGroup>
+            </UFormField>
 
             <!-- Validation Badges -->
             <div class="flex flex-wrap gap-2 pt-2" v-if="fileList.length > 0">
@@ -512,31 +550,31 @@ async function toggleJob(task: string) {
                     <h3 class="font-semibold text-sm text-gray-700 flex items-center gap-2">
                         <UIcon name="i-heroicons-cog-6-tooth" /> Configure Job
                     </h3>
-                    <UToggle v-model="uploadState.useManualConfig" />
+                    <USwitch v-model="uploadState.useManualConfig" />
                 </div>
 
                 <div v-if="uploadState.useManualConfig" class="space-y-4 animate-in fade-in slide-in-from-top-2 duration-300">
-                    <UFormGroup label="Entry Point" help="Script to execute">
+                    <UFormField label="Entry Point" help="Script to execute">
                         <USelect v-model="uploadState.entryPoint" :options="availableEntryPoints" />
-                    </UFormGroup>
+                    </UFormField>
 
                     <div class="grid grid-cols-2 gap-4">
-                        <UFormGroup label="Schedule Type">
+                        <UFormField label="Schedule Type">
                             <USelect v-model="uploadState.scheduleType" :options="['interval', 'cron']" />
-                        </UFormGroup>
+                        </UFormField>
                         
                         <div v-if="uploadState.scheduleType === 'interval'" class="flex gap-2 items-end">
-                            <UFormGroup label="Every" class="flex-1">
+                            <UFormField label="Every" class="flex-1">
                                 <UInput v-model="uploadState.scheduleInterval" type="number" min="1" />
-                            </UFormGroup>
-                            <UFormGroup label="Unit" class="flex-1">
+                            </UFormField>
+                            <UFormField label="Unit" class="flex-1">
                                 <USelect v-model="uploadState.scheduleUnit" :options="['seconds', 'minutes', 'hours', 'days']" />
-                            </UFormGroup>
+                            </UFormField>
                         </div>
                         
-                        <UFormGroup v-else label="Cron Expression" class="col-span-1">
+                        <UFormField v-else label="Cron Expression" class="col-span-1">
                             <UInput v-model="uploadState.scheduleCron" placeholder="* * * * *" />
-                        </UFormGroup>
+                        </UFormField>
                     </div>
                 </div>
                 <div v-else class="text-xs text-gray-500 italic">
@@ -577,33 +615,51 @@ async function toggleJob(task: string) {
             </template>
             
             <form @submit.prevent="onUpdateConfig" class="space-y-4">
-                <UFormGroup label="Description">
+                <UFormField label="Description">
                     <UInput v-model="editState.description" />
-                </UFormGroup>
+                </UFormField>
                 
-                <UFormGroup label="Entry Point">
+                <UFormField label="Entry Point">
                     <UInput v-model="editState.entryPoint" />
-                </UFormGroup>
+                </UFormField>
                 
-                <UFormGroup label="Schedule Type">
+                <UFormField label="Schedule Type">
                     <USelect v-model="editState.scheduleType" :options="['interval', 'cron']" />
-                </UFormGroup>
+                </UFormField>
                 
                 <div v-if="editState.scheduleType === 'interval'" class="flex gap-2">
-                    <UFormGroup label="Value" class="flex-1">
+                    <UFormField label="Value" class="flex-1">
                         <UInput v-model="editState.intervalValue" type="number" />
-                    </UFormGroup>
-                    <UFormGroup label="Unit" class="flex-1">
+                    </UFormField>
+                    <UFormField label="Unit" class="flex-1">
                         <USelect v-model="editState.intervalUnit" :options="['seconds', 'minutes', 'hours', 'days']" />
-                    </UFormGroup>
+                    </UFormField>
                 </div>
                 
                 <div v-else>
-                    <UFormGroup label="Cron Expression">
+                    <UFormField label="Cron Expression">
                         <UInput v-model="editState.cronExpression" placeholder="* * * * *" />
-                    </UFormGroup>
+                    </UFormField>
                 </div>
-                
+
+                <!-- Resource Groups -->
+                <UFormField label="Resource Groups" help="Jobs in the same group run sequentially">
+                    <div class="flex flex-wrap gap-1 mb-2" v-if="editState.resourceGroups.length > 0">
+                        <UBadge v-for="group in editState.resourceGroups" :key="group" color="secondary" variant="subtle" class="flex items-center gap-1">
+                            {{ group }}
+                            <UButton size="xs" color="secondary" variant="link" icon="i-heroicons-x-mark" :padded="false" @click="removeResourceGroup(group)" />
+                        </UBadge>
+                    </div>
+                    <div class="flex gap-2">
+                        <UInput v-model="editState.newGroupInput" placeholder="e.g. headless-browser" class="flex-1" @keyup.enter="addResourceGroup" />
+                        <UButton size="sm" color="gray" @click="addResourceGroup" :disabled="!editState.newGroupInput.trim()">Add</UButton>
+                    </div>
+                </UFormField>
+
+                <UFormField label="Queue Wait Timeout (seconds)" help="Max time to wait for resource group lock (leave empty for default)">
+                    <UInput v-model="editState.queueWaitTimeout" type="number" placeholder="3600" />
+                </UFormField>
+
                 <div class="flex justify-end gap-2 mt-6">
                     <UButton color="gray" variant="ghost" @click="editModal = false">Cancel</UButton>
                     <UButton type="submit" color="primary" :loading="updating">Save Changes</UButton>
