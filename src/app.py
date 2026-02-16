@@ -3,6 +3,7 @@ import sys
 from pathlib import Path
 
 import yaml
+from apscheduler.executors.pool import ThreadPoolExecutor
 from apscheduler.schedulers.background import BackgroundScheduler
 from flask import Flask, jsonify, redirect, render_template, request, url_for
 from flask_cors import CORS
@@ -36,8 +37,10 @@ def create_app() -> Flask:
         (base / config["paths"][dir_key]).mkdir(parents=True, exist_ok=True)
     (base / config["paths"]["db_path"]).parent.mkdir(parents=True, exist_ok=True)
 
-    # Initialize scheduler
-    scheduler = BackgroundScheduler(daemon=True)
+    # Initialize scheduler with configurable thread pool
+    max_workers = config.get("scheduler", {}).get("max_workers", 20)
+    executors = {"default": ThreadPoolExecutor(max_workers=max_workers)}
+    scheduler = BackgroundScheduler(executors=executors, daemon=True)
 
     # Initialize job manager
     manager = JobManager(config, scheduler)
@@ -159,6 +162,11 @@ def register_routes(app: Flask):
         manager = get_manager()
         return jsonify(manager.get_system_status())
 
+    @app.route("/api/resource-groups")
+    def api_resource_groups():
+        manager = get_manager()
+        return jsonify(manager.get_resource_groups())
+
     @app.route("/api/upload", methods=["POST"])
     def api_upload_job():
         manager = get_manager()
@@ -229,7 +237,7 @@ if __name__ == "__main__":
     config = load_config()
     server = config.get("server", {})
     app.run(
-        host=server.get("host", "0.0.0.0"),
-        port=server.get("port", 5000),
+        host=server.get("host", "127.0.0.1"),
+        port=server.get("port", 8000),
         debug=server.get("debug", False),
     )

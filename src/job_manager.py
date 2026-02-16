@@ -67,6 +67,16 @@ class JobManager:
 
         self._db_lock = threading.Lock()
         self._job_locks: dict[str, threading.Lock] = {}
+
+        # Resource group queuing
+        self._resource_group_locks: dict[str, threading.Lock] = {}
+        self._rg_meta_lock = threading.Lock()
+        self._queued_jobs: set[str] = set()
+        self._queued_jobs_lock = threading.Lock()
+        self._default_queue_wait_timeout: int = config.get("scheduler", {}).get(
+            "queue_wait_timeout_seconds", 3600
+        )
+
         self._init_db()
         self._cleanup_stale_runs()
 
@@ -85,18 +95,27 @@ class JobManager:
                 conn.execute("DROP TABLE IF EXISTS jobs")
             
             conn.executescript(SCHEMA_SQL)
+
+            # Add resource_groups and queue_wait_timeout columns if missing
+            cursor = conn.execute("PRAGMA table_info(jobs)")
+            columns = [info[1] for info in cursor.fetchall()]
+            if "resource_groups" not in columns:
+                conn.execute("ALTER TABLE jobs ADD COLUMN resource_groups TEXT DEFAULT NULL")
+            if "queue_wait_timeout" not in columns:
+                conn.execute("ALTER TABLE jobs ADD COLUMN queue_wait_timeout INTEGER DEFAULT NULL")
+
             conn.commit()
             conn.close()
 
     def _cleanup_stale_runs(self):
-        """Mark jobs that were 'running' during a previous crash as failed."""
+        """Mark jobs that were 'running' or 'queued' during a previous crash as failed."""
         with self._db_lock:
             conn = self._get_conn()
             try:
                 conn.execute(
-                    """UPDATE runs 
+                    """UPDATE runs
                        SET status='failed', error_message='System restarted while running', finished_at=?
-                       WHERE status='running'""",
+                       WHERE status IN ('running', 'queued')""",
                     (datetime.now().isoformat(),)
                 )
                 conn.commit()
@@ -113,6 +132,12 @@ class JobManager:
         if job_id not in self._job_locks:
             self._job_locks[job_id] = threading.Lock()
         return self._job_locks[job_id]
+
+    def _get_rg_lock(self, group: str) -> threading.Lock:
+        with self._rg_meta_lock:
+            if group not in self._resource_group_locks:
+                self._resource_group_locks[group] = threading.Lock()
+            return self._resource_group_locks[group]
 
     def scan_jobs(self):
         """Scan the jobs directory and register/update jobs."""
@@ -173,6 +198,10 @@ class JobManager:
         schedule_type = schedule.get("type", "interval")
         schedule_config = {k: v for k, v in schedule.items() if k != "type"}
 
+        resource_groups = job_config.get("resource_groups")
+        resource_groups_json = json.dumps(resource_groups) if resource_groups else None
+        queue_wait_timeout = job_config.get("queue_wait_timeout")
+
         with self._db_lock:
             conn = self._get_conn()
             try:
@@ -184,7 +213,8 @@ class JobManager:
                     conn.execute(
                         """UPDATE jobs SET
                             name=?, description=?, schedule_type=?, schedule_config=?,
-                            entry_point=?, timeout=?, yaml_mtime=?, updated_at=?
+                            entry_point=?, timeout=?, resource_groups=?,
+                            queue_wait_timeout=?, yaml_mtime=?, updated_at=?
                         WHERE id=?""",
                         (
                             job_config.get("name", task),
@@ -193,6 +223,8 @@ class JobManager:
                             json.dumps(schedule_config),
                             job_config.get("entry_point", "main.py"),
                             job_config.get("timeout", 3600),
+                            resource_groups_json,
+                            queue_wait_timeout,
                             yaml_mtime,
                             now,
                             job_id,
@@ -203,8 +235,9 @@ class JobManager:
                         """INSERT INTO jobs
                             (id, task, name, description, schedule_type,
                              schedule_config, entry_point, timeout, enabled,
+                             resource_groups, queue_wait_timeout,
                              yaml_mtime, created_at, updated_at)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)""",
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?)""",
                         (
                             job_id,
                             task,
@@ -214,6 +247,8 @@ class JobManager:
                             json.dumps(schedule_config),
                             job_config.get("entry_point", "main.py"),
                             job_config.get("timeout", 3600),
+                            resource_groups_json,
+                            queue_wait_timeout,
                             yaml_mtime,
                             now,
                             now,
@@ -313,15 +348,121 @@ class JobManager:
         logger.info("Unregistered job: %s", job_id)
 
     def execute_job(self, job_id: str):
-        """Execute a job as a subprocess."""
+        """Execute a job as a subprocess, respecting resource group locks."""
         lock = self._get_job_lock(job_id)
         if not lock.acquire(blocking=False):
             logger.warning("Job %s is already running, skipping", job_id)
             return
 
+        acquired_rg_locks: list[threading.Lock] = []
         try:
+            # Read resource groups from DB
+            with self._db_lock:
+                conn = self._get_conn()
+                try:
+                    row = conn.execute(
+                        "SELECT resource_groups, queue_wait_timeout FROM jobs WHERE id = ?",
+                        (job_id,),
+                    ).fetchone()
+                finally:
+                    conn.close()
+
+            groups: list[str] = []
+            if row and row["resource_groups"]:
+                try:
+                    groups = json.loads(row["resource_groups"])
+                except (json.JSONDecodeError, TypeError):
+                    groups = []
+
+            if not groups:
+                self._run_job(job_id)
+                return
+
+            # Determine timeout
+            wait_timeout = self._default_queue_wait_timeout
+            if row and row["queue_wait_timeout"] is not None:
+                wait_timeout = row["queue_wait_timeout"]
+
+            # Sort alphabetically to prevent deadlocks
+            sorted_groups = sorted(groups)
+
+            # Record queued status
+            run_id = None
+            with self._db_lock:
+                conn = self._get_conn()
+                try:
+                    cursor = conn.execute(
+                        """INSERT INTO runs (job_id, status, started_at)
+                        VALUES (?, 'queued', ?)""",
+                        (job_id, datetime.now().isoformat()),
+                    )
+                    run_id = cursor.lastrowid
+                    conn.commit()
+                finally:
+                    conn.close()
+
+            with self._queued_jobs_lock:
+                self._queued_jobs.add(job_id)
+
+            # Acquire resource group locks in alphabetical order
+            deadline = time.monotonic() + wait_timeout
+            timed_out = False
+            for group in sorted_groups:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    timed_out = True
+                    break
+                rg_lock = self._get_rg_lock(group)
+                if not rg_lock.acquire(timeout=remaining):
+                    timed_out = True
+                    break
+                acquired_rg_locks.append(rg_lock)
+
+            # Remove from queued set
+            with self._queued_jobs_lock:
+                self._queued_jobs.discard(job_id)
+
+            if timed_out:
+                # Release any acquired locks
+                for rg_lock in reversed(acquired_rg_locks):
+                    rg_lock.release()
+                acquired_rg_locks.clear()
+
+                # Record timeout
+                now = datetime.now()
+                with self._db_lock:
+                    conn = self._get_conn()
+                    try:
+                        conn.execute(
+                            """UPDATE runs SET status='timeout',
+                                error_message='Timed out waiting for resource group lock',
+                                finished_at=?
+                            WHERE id=?""",
+                            (now.isoformat(), run_id),
+                        )
+                        conn.commit()
+                    finally:
+                        conn.close()
+                logger.warning(
+                    "Job %s timed out waiting for resource group locks", job_id
+                )
+                return
+
+            # Delete the queued run record — _run_job will create its own
+            with self._db_lock:
+                conn = self._get_conn()
+                try:
+                    conn.execute("DELETE FROM runs WHERE id = ?", (run_id,))
+                    conn.commit()
+                finally:
+                    conn.close()
+
             self._run_job(job_id)
+
         finally:
+            # Release resource group locks in reverse order
+            for rg_lock in reversed(acquired_rg_locks):
+                rg_lock.release()
             lock.release()
 
     def _run_job(self, job_id: str):
@@ -491,6 +632,20 @@ class JobManager:
                 result = []
                 for job in jobs:
                     job_dict = dict(job)
+
+                    # Parse resource_groups JSON
+                    rg_raw = job_dict.get("resource_groups")
+                    if rg_raw:
+                        try:
+                            job_dict["resource_groups"] = json.loads(rg_raw)
+                        except (json.JSONDecodeError, TypeError):
+                            job_dict["resource_groups"] = []
+                    else:
+                        job_dict["resource_groups"] = []
+
+                    # Check if job is currently queued
+                    with self._queued_jobs_lock:
+                        job_dict["is_queued"] = job["id"] in self._queued_jobs
 
                     # Get next run time from scheduler
                     try:
@@ -733,7 +888,10 @@ class JobManager:
     def get_system_status(self) -> dict:
         """Get current system status summary."""
         running_count = sum(1 for lock in self._job_locks.values() if lock.locked())
-        
+
+        with self._queued_jobs_lock:
+            queued_count = len(self._queued_jobs)
+
         status = "idle"
         if running_count > 0:
             status = "running"
@@ -743,61 +901,17 @@ class JobManager:
         return {
             "status": status,
             "running_count": running_count,
-            "pending_count": len(self.pending_updates)
+            "queued_count": queued_count,
+            "pending_count": len(self.pending_updates),
         }
-        """Apply pending updates if the system is idle."""
-        if not self.pending_updates:
-            return
 
-        if not self.is_system_idle():
-            logger.debug("System busy, postponing updates")
-            return
-
-        logger.info("System idle, processing %d updates", len(self.pending_updates))
-        
-        # Clone set to iterate safely while modifying original
-        to_process = list(self.pending_updates)
-        
-        for job_id in to_process:
-            user, task = job_id.split("/")
-            staging_path = self.staging_dir / user / task
-            dest_path = self.jobs_dir / user / task
-            
-            if not staging_path.exists():
-                self.pending_updates.discard(job_id)
-                continue
-
-            try:
-                dest_path.mkdir(parents=True, exist_ok=True)
-                shutil.copytree(staging_path, dest_path, dirs_exist_ok=True)
-                shutil.rmtree(staging_path)
-                self.pending_updates.discard(job_id)
-                logger.info("Applied update for %s", job_id)
-            except Exception:
-                logger.exception("Failed to apply update for %s", job_id)
-
-        # Reload configuration
-        self.scan_jobs()
-
-    def is_system_idle(self) -> bool:
-        """Check if any jobs are currently running."""
-        for lock in self._job_locks.values():
-            if lock.locked():
-                return False
-        return True
-
-    def get_system_status(self) -> dict:
-        """Get current system status summary."""
-        running_count = sum(1 for lock in self._job_locks.values() if lock.locked())
-        
-        status = "idle"
-        if running_count > 0:
-            status = "running"
-        elif self.pending_updates:
-            status = "updating"
-
-        return {
-            "status": status,
-            "running_count": running_count,
-            "pending_count": len(self.pending_updates)
-        }
+    def get_resource_groups(self) -> list[dict]:
+        """Get list of resource groups and their lock status."""
+        with self._rg_meta_lock:
+            groups = []
+            for name, lock in sorted(self._resource_group_locks.items()):
+                groups.append({
+                    "name": name,
+                    "locked": lock.locked(),
+                })
+            return groups

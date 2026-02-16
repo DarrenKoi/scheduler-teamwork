@@ -61,7 +61,6 @@ timeout: 3600           # 타임아웃 초 (기본값: 3600)
 ### 1. 설치
 
 ```bash
-cd web-development/python/flask/job-scheduler
 uv sync
 ```
 
@@ -70,7 +69,7 @@ uv sync
 ```bash
 uv run src/app.py
 ```
-Backend runs on http://localhost:5050
+Backend runs on http://127.0.0.1:8000
 
 ### 3. 모던 프론트엔드 실행 (Nuxt UI)
 
@@ -81,7 +80,7 @@ cd frontend
 npm install
 npm run dev
 ```
-Frontend runs on http://localhost:3000 (proxies requests to backend at 5050).
+Frontend runs on http://localhost:3000.
 
 ### 4. 작업 추가 및 관리
 
@@ -134,7 +133,8 @@ EOF
 
 ```yaml
 server:
-  port: 5050
+  host: "127.0.0.1"
+  port: 8000
 
 scheduler:
   scan_interval_seconds: 60  # 파일 변경 감지 주기

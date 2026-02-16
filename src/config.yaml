@@ -1,6 +1,6 @@
 server:
   host: "0.0.0.0"
-  port: 5050
+  port: 8000
   debug: false
 
 paths:
@@ -10,6 +10,8 @@ paths:
 
 scheduler:
   scan_interval_seconds: 60       # 작업 폴더 스캔 주기
+  max_workers: 20                  # APScheduler thread pool 크기
+  queue_wait_timeout_seconds: 3600 # 리소스 그룹 lock 대기 최대 시간
 
 security:
   allowed_users: []               # 비어있으면 모든 사용자 허용
